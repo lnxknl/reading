@@ -1,0 +1,99 @@
+工作之后，我会花几个小时学习一门新技术，再用一小时将今天学到的写在博客上。这项活动的目的是熟悉许多在开发者社区所使用的新技术。
+   Docker 扩展了 Linux 容器（Linux Containers），或着说 LXC，通过一个高层次的 API 为进程单独提供了一个轻量级的虚拟环境。Docker 利用了 LXC， cgroups 和 Linux 自己的内核。
+   Docker 会像一个可移植的容器引擎那样工作。它把应用程序及所有程序的依赖环境打包到一个虚拟容器中，这个虚拟容器可以运行在任何一种 Linux 服务器上。这大大地提高了程序运行的
+灵活性和可移植性，无论需不需要许可、是在公共云还是私密云、是不是裸机环境等等。
+   Docker 由下面这些组成：
+
+   1. Docker 服务器守护程序（server daemon），用于管理所有的容器。
+
+   2. Docker 命令行客户端，用于控制服务器守护程序。
+
+   3. Docker 镜像：查找和浏览 docker 容器镜像。它也访问这里得到：https://index.docker.io/
+
+   到现在为止，要把程序可靠地移植的唯一选择是虚拟机（Virtual Machines，VMs）。虚拟机现在已经很常见了，但虚拟机是非常低级，它提供的是完整的操作系统环境。虚拟机的问题是，迁
+移的资源。大了。它们包含了大量类似硬件驱动、虚拟处理器、网络接口等等并不需要的信息。 虚拟机也需要比较长时间的启动，同时也会消耗大量的内存、CPU
+
+      4a5715a915e5        mattdm/fedora   /bin/bash           5 minutes ago       Up 5 minutes        0.0.0.0:49157->3000/tcp   red_duck
+
+      $ sudo docker commit 4a5715a915e5 shekhargulati/node_image_007
+      $ sudo docker push shekhargulati/node_image_007
+
+   我们会写一个在办公时间内（早上 9 点到下午 6 点），禁止我们访问类似 Facebook、Twitter 这样的社交网站的一个简单的插件。如果用户访问 facebook 或者 twitter，他会看到下面的
+
+      $ npm install -g yeoman
+
+
+   3. 然后，它询问我们要不要使用 UI Action。我们使用 Browser UI Action。Browser Action 允许我们在 Chrome 的 Omnibox 旁边放一个可以点击的图标。点击这个图标就可以打开一个 h
+tml 文件。
+   4. 接着，它会问我们是否需要添加更多 UI 的功能。我们添加选项页（Option Page）和 Omnibox 特性。
+
+                                                                              更新 Background.js
+
+
+   这个 Chrome 扩展程序的行为是受在文件夹 app/scripts 下面的 background.js 控制的。复制下面的代码，然后替换 background.js 的源代码。
+
+      'use strict';
+      chrome.webRequest.onBeforeRequest.addListener(
+          function(details) {
+              var currentTime = new Date();
+              if(isOfficeTime(currentTime) && isWeekday(currentTime)){
+                  return {redirectUrl: chrome.extension.getURL('index.html')};
+              }
+              return details.url;
+          },
+          {
+              urls: [
+                  "*://*.facebook.com/*",
+                  "*://*.twitter.com/*",
+                  "*://*.gmail.com/*",
+              ],
+              types: ["main_frame", "sub_frame", "stylesheet", "script", "image", "object", "xmlhttprequest", "other"]
+          },
+          ["blocking"]
+      );
+      function isOfficeTime(currentTime){
+          var hour = currentTime.getHours();
+          return hour > 9 && hour < 18;
+      }
+      function isWeekday(currentTime){
+          var dayOfWeek = currentTime.getDay();
+          return dayOfWeek >= 1 && dayOfWeek <= 5;
+      }
+
+   上面的代码做下面的事情：
+
+   它监听 onBeforeRequest 事件，它触发将要出现的请求。addListener 函数接受三个参数：
+
+   1. 一个回调（callback）函数，它会在事件触发时执行。
+
+   2. RequestFilter 对象，是一个将 webRequest 事件过滤的过滤器。我们会列出一系列要被过滤掉 URL 模式。
+
+   3. 一个包含 blocking字符串（只允许特定的事件）的数组，回调函数会被同时处理。
+
+   我们也另外定义了一些函数去查询当前的时间和当前日期是在一周中的哪一天。它只会在工作日的上午九点到下午六点之间屏蔽掉社交网站。
+
+   上面的代码使用 WebRequest API。我们需要让这个扩展程序访问 chrome.webRequest API。这要用到 webRequest 权限。由于这个扩展程序在屏蔽模块中使用了 chrome.webRequest API，所
+以我manifest.json 文件，然后更新权限模块：。打开 app 目录下的
+
+      "permissions": [
+          "webRequest",
+          "tabs",
+          "http://*/*",
+          "https://*/*",
+          "webRequestBlocking"
+        ]
+
+   我们最后要做的就是添加一个 index.html。这个是用户访问 facebook、twitter 等等网站时要渲染显示的。
+
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <title>No Socializing</title>
+        <link rel="stylesheet" href="/styles/main.css">
+      </head>
+      <body>
+        <h1>NO, Socializing</h1>
+        <img src="/images/no-social-media.jpg" height="450" width="450">
+        <h2>It's Office Time  Dude</h2>
+      </body>
+      </html>
