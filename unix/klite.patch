@@ -1,0 +1,382 @@
+    用0xCC初始化stack，有利于调试
+    +               memset(stack_base, 0xCC, stack_size);^M
+
+
+    struct tcb_list
+{
+	struct tcb_node *head;
+	struct tcb_node *tail;
+};
+
+struct tcb_node
+{
+	struct tcb_node *prev;
+	struct tcb_node *next;
+	struct tcb      *tcb;
+};
+
+struct tcb
+{
+	void            *stack;
+	void           (*entry)(void*);
+	uint32_t         prio;
+	uint32_t         time;
+	uint32_t         timeout;
+	struct tcb_list *list_sched;
+	struct tcb_list *list_wait;
+	struct tcb_node  node_sched;
+	struct tcb_node  node_wait;
+};
+
+
+struct tcb             *sched_tcb_now;
+extern struct tcb *sched_tcb_now;
+
+static void pending_handler(void)
+{
+	intc_clear_pending(PENDING_IRQ);
+}
+
+static void systick_handler(void)
+{
+	kernel_tick(1);
+	TIMER->ISR |= 0x01;
+}
+
+static void systick_init(void)
+{
+	TIMER->TIM0_CTRL &= ~0x01;
+	TIMER->ISR |= 0x01;
+	TIMER->IER |= 0x01;
+	TIMER->TIM0_INTV = 24000;
+	TIMER->TIM0_CTRL = 0x4;
+	TIMER->TIM0_CTRL |= 0x02;
+	while(TIMER->TIM0_CTRL & 0x02);
+	TIMER->TIM0_CTRL |= 0x01;
+}
+
+void intc_clear_pending(int irq)
+{
+	if(irq < 32)
+	{
+		INTC->FF[0] &= ~(1 << irq);
+	}
+	else
+	{
+		irq -= 32;
+		INTC->FF[1] &= ~(1 << irq);
+	}
+}
+
+void cpu_sys_init(void)
+{
+	arm_disable_irq();
+	intc_init();
+	intc_set_priority(SYSTICK_IRQ, 0); //0 is lowest
+	intc_set_priority(PENDING_IRQ, 0);
+	intc_set_handler(SYSTICK_IRQ, systick_handler);
+	intc_set_handler(PENDING_IRQ, pending_handler);
+	intc_enable_irq(SYSTICK_IRQ);
+	intc_enable_irq(PENDING_IRQ);
+}
+
+static void systick_handler(void)
+{
+	kernel_tick(1);
+	TIMER->ISR |= 0x01;
+}
+
+
+__asm void arm_disable_irq(void)
+{
+	MRS    R0, CPSR
+	ORR    R0, R0, #0x80
+	MSR    CPSR_c, R0
+	BX     LR
+}
+
+static uint32_t m_vector[IRQ_MAX];
+typedef struct
+{
+	__IO uint32_t VECTOR;
+	__IO uint32_t BASE_ADDR;
+	__IO uint32_t RSV1;
+	__IO uint32_t NMI_CTRL;
+	__IO uint32_t PEND[2];
+	__IO uint32_t RSV2[2];
+	__IO uint32_t EN[2];
+	__IO uint32_t RSV3[2];
+	__IO uint32_t MASK[2];
+	__IO uint32_t RSV4[2];
+	__IO uint32_t RESP[2];
+	__IO uint32_t RSV5[2];
+	__IO uint32_t FF[2];
+	__IO uint32_t RSV6[2];
+	__IO uint32_t PRIO[4];
+} INTC_Type;
+
+#define INTC  ((INTC_Type *)(0x01C20400))
+
+
+void intc_init(void)
+{
+	memset(m_vector, 0, sizeof(m_vector));
+	INTC->BASE_ADDR = (uint32_t)m_vector;
+	INTC->PEND[0] = 0xFFFFFFFF;
+	INTC->PEND[1] = 0xFFFFFFFF;
+	INTC->EN[0] = 0;
+	INTC->EN[1] = 0;
+	INTC->FF[0] = 0;
+	INTC->FF[1] = 0;
+}
+
+void intc_set_handler(int irq, void (*isr)(void))
+{
+	m_vector[irq] = (uint32_t)isr;
+}
+
+void sched_init(void)
+{
+	m_idle_timeout = UINT32_MAX;
+	m_prio_highest = 0;
+	m_prio_bitmap = 0;
+	sched_tcb_now = NULL;
+	sched_tcb_next = sched_tcb_now - 1; /* mark the last switch was not completed */
+	memset(m_list_ready, 0, sizeof(m_list_ready));
+	memset(&m_list_sleep, 0, sizeof(m_list_sleep));
+}
+
+static struct tcb_list  m_list_ready[THREAD_PRIORITY_HIGHEST + 1];
+
+void heap_init(void *addr, uint32_t size)
+{
+	uint32_t start;
+	uint32_t end;
+	start = MEM_ALIGN_PAD((uint32_t)addr);
+	end = MEM_ALIGN_CUT((uint32_t)addr + size);
+	memset(&m_heap, 0, sizeof(struct heap_contex));
+	heap_node_init(&m_heap, start, end);
+}
+
+
+#define MEM_ALIGN_BYTE      (4)
+#define MEM_ALIGN_MASK      (MEM_ALIGN_BYTE - 1)
+#define MEM_ALIGN_PAD(m)    (((m) + MEM_ALIGN_MASK) & (~MEM_ALIGN_MASK))
+#define MEM_ALIGN_CUT(m)    ((m) & (~MEM_ALIGN_MASK))
+
+
+static struct heap_contex m_heap;
+
+static void heap_node_init(struct heap_contex *heap, uint32_t start, uint32_t end)
+{
+	struct heap_node *node;
+	node = (struct heap_node *)start;
+	heap->size = end - start;
+	heap->head = node;
+	heap->free = node;
+	node->used = sizeof(struct heap_node);
+	node->prev = NULL;
+	node->next = (struct heap_node *)(end - sizeof(struct heap_node));
+	node = node->next;
+	node->used = sizeof(struct heap_node);
+	node->prev = heap->head;
+	node->next = NULL;
+}
+
+
+static void list_remove(void *list, void *node)
+{
+	if(((struct __node *)node)->prev == NULL)
+	{
+		((struct __list *)list)->head = ((struct __node *)node)->next;
+	}
+	else
+	{
+		((struct __node *)node)->prev->next = ((struct __node *)node)->next;
+	}
+	if(((struct __node *)node)->next == NULL)
+	{
+		((struct __list *)list)->tail = ((struct __node *)node)->prev;
+	}
+	else
+	{
+		((struct __node *)node)->next->prev = ((struct __node *)node)->prev;
+	}
+}
+
+
+void cpu_contex_switch(void)
+{
+	intc_set_pending(PENDING_IRQ);
+}
+
+
+void intc_set_pending(int irq)
+{
+	if(irq < 32)
+	{
+		INTC->FF[0] |= (1 << irq);
+	}
+	else
+	{
+		irq -= 32;
+		INTC->FF[1] |= (1 << irq);
+	}
+}
+
+	IRQ_WATCHDOG     = 16,
+
+#define PENDING_IRQ IRQ_WATCHDOG
+
+
+thread_t thread_create(void (*entry)(void*), void *arg, uint32_t stack_size)
+{
+	struct tcb *tcb;
+	uint8_t *stack_base;
+	stack_size = stack_size ? stack_size : 1024;
+	tcb = heap_alloc(sizeof(struct tcb) + stack_size);
+	if(tcb != NULL)
+	{
+		stack_base = (uint8_t *)(tcb + 1);
+		memset(tcb, 0, sizeof(struct tcb));
+		memset(stack_base, 0xCC, stack_size);
+		tcb->prio  = THREAD_PRIORITY_NORMAL;
+		tcb->stack = cpu_contex_init(stack_base, stack_base + stack_size, entry, arg, thread_exit);
+		tcb->entry = entry;
+		tcb->node_wait.tcb = tcb;
+		tcb->node_sched.tcb = tcb;
+		cpu_enter_critical();
+		sched_tcb_ready(tcb);
+		cpu_leave_critical();
+	}
+	return (thread_t)tcb;
+}
+
+
+void kernel_idle(void)
+{
+	void thread_clean_up(void);
+	m_idle_thread = thread_self();
+	thread_set_priority(m_idle_thread, THREAD_PRIORITY_IDLE);
+	while(1)
+	{
+		thread_clean_up();
+		cpu_enter_critical();
+		sched_idle();
+		cpu_leave_critical();
+	}
+}
+
+
+#define  THREAD_PRIORITY_HIGHEST   7
+#define  THREAD_PRIORITY_HIGHER    6
+#define  THREAD_PRIORITY_HIGH      5
+#define  THREAD_PRIORITY_NORMAL    4
+#define  THREAD_PRIORITY_LOW       3
+#define  THREAD_PRIORITY_LOWER     2
+#define  THREAD_PRIORITY_LOWEST    1
+#define  THREAD_PRIORITY_IDLE      0
+
+
+void thread_set_priority(thread_t thread, uint32_t prio)
+{
+	cpu_enter_critical();
+	sched_tcb_reset(thread, prio);
+	thread->prio = prio;
+	sched_preempt(false);
+	cpu_leave_critical();
+}
+
+
+void thread_clean_up(void)
+{
+	struct tcb_node *node;
+	while(m_list_dead.head)
+	{
+		cpu_enter_critical();
+		node = m_list_dead.head;
+		list_remove(&m_list_dead, node);
+		cpu_leave_critical();
+		heap_free(node->tcb);
+	}
+}
+
+void sched_idle(void)
+{
+	if(m_prio_bitmap != 0)
+	{
+		sched_tcb_ready(sched_tcb_now);
+		sched_switch();
+	}
+	else
+	{
+		cpu_sys_sleep(m_idle_timeout);
+	}
+}
+
+
+void bsp_init(void)
+{
+	GPIO->PADKEY = 115;
+	GPIO->ENA |= (1 << 14) | (1 << 15);
+	GPIO->CFGB = 0xFFFFFFFF;
+	GPIO->PADKEY = 0;
+}
+
+
+void app_init(void)
+{
+	thread_create(demo_thread1, NULL, 512);
+	thread_create(demo_thread2, NULL, 512);
+}
+
+
+static void demo_thread1(void *arg)
+{
+	while(1)
+	{
+		bsp_led_on(0);
+		thread_sleep(500);
+		bsp_led_off(0);
+		thread_sleep(500);
+	}
+}
+
+void kernel_start(void)
+{
+	sched_switch();
+	cpu_sys_start();
+}
+
+
+void cpu_sys_start(void)
+{
+	systick_init();
+	arm_enable_irq();
+}
+
+void sched_tcb_ready(struct tcb *tcb)
+{
+	tcb->list_sched = &m_list_ready[tcb->prio];
+	list_append(tcb->list_sched, &tcb->node_sched);
+	m_prio_bitmap |= (1 << tcb->prio);
+	if(m_prio_highest < tcb->prio)
+	{
+		m_prio_highest = tcb->prio;
+	}
+}
+
+void sched_switch(void)
+{
+	struct tcb *tcb;
+	tcb = m_list_ready[m_prio_highest].head->tcb;
+	list_remove(tcb->list_sched, &tcb->node_sched);
+	if(tcb->list_sched->head == NULL)
+	{
+		m_prio_bitmap &= ~(1 << tcb->prio);
+		m_prio_highest = find_highest_priority(m_prio_highest);
+	}
+	tcb->list_sched = NULL;
+	sched_tcb_next = tcb;
+	cpu_contex_switch();
+}
