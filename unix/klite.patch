@@ -1,4 +1,4 @@
-    用0xCC初始化stack，有利于调试
+    用[0xCC初始化stack，有利于调试
     +               memset(stack_base, 0xCC, stack_size);^M
 
 
