@@ -1,0 +1,483 @@
+             if (node->session != NULL) {
+-                hal_mutex_lock(node->session->lock);
++                session_t *session = node->session;
++                hal_mutex_lock(session->lock);
+                 list_del(&node->linked_list2);
+-                hal_mutex_unlock(node->session->lock);
++                node->session = NULL;
++                hal_mutex_unlock(session->lock);
+                 /*session changed*/
+-                if (node->session->state_cb) {
+-                    node->session->state_cb(node->session, &node->id, PEER_LOST, node->session->state_cb_ctx);
++                if (session->state_cb) {
++                    session->state_cb(session, &node->id, SESSION_MEMBER_LEAVE, session->state_cb_ctx);
+                 }
+
+             }
+
+     hal_mutex_lock(state->lock);
++    if (state->announced == 0) {
++        hal_mutex_unlock(state->lock);
++        log_w("advertising is canceled, do nothing");
++        return;
++    }
+
+
+-    buffer = aos_malloc(SERVICE_DATA_MAX_LEN);
++    buffer =  hal_malloc(SERVICE_DATA_MAX_LEN);
+
+
+@@ -547,7 +555,21 @@ static void  uemsh_sock_read_func(int fd, void *arg)
+
+                     list_for_each_entry_safe(node, next, &g_service_state->found_service_list, linked_list, service
+_t) {
+                         if (!memcmp(&node->id.ip6, &addr.sin6_addr, sizeof(addr.sin6_addr))) {
++                            service_t *node_ss, *next_ss;
++                            int find = 0;
+                             hal_mutex_lock(session->lock);
++
++                            list_for_each_entry_safe(node_ss, next_ss, &session->peers_list, linked_list2, service_
+t) {
++                                if (!memcmp(&node_ss->id.ip6, &addr.sin6_addr, sizeof(addr.sin6_addr))) {
++                                    log_w("service %s already in session! ignore it", node_ss->srv_name);
++                                    find = 1;
++                                    break;
++                                }
++                            }
++                            if(find == 1) {
++                                hal_mutex_unlock(session->lock);
++                                break;
++                            }
+                             list_add_tail(&node->linked_list2, &session->peers_list);
+                             node->session = session;
+                             hal_mutex_unlock(session->lock);
+
+
+
+     list_for_each_entry_safe(node, next, &session->peers_list, linked_list2, service_t) {
+         list_del(&node->linked_list2);
+         node->session = NULL;
++        log_d("delete node...");
+     }
+
+
+          if (!g_service_state->announced) {
+-        mdns_announce(g_service_state->mdns, MESH_REQUEST_TYPE, RR_PTR, callback_send, g_service_state);
+         g_service_state->announced = 1;
++        mdns_announce(g_service_state->mdns, MESH_REQUEST_TYPE, RR_PTR, callback_send, g_service_state);
+     }
+
+
+
+-    if (atcmd_index > ATCMD_SIZE) {
++    if (atcmd_index >= ATCMD_SIZE) {
+         atcmd_index = 0;
+     }
+
+-#define LORAWAN_APP_DATA_BUFF_SIZE 128
++#define LORAWAN_APP_DATA_BUFF_SIZE 256
+
+
+@@ -155,6 +155,8 @@ static srtp_err_status_t srtp_aes_gcm_mbedtls_dealloc(srtp_cipher_t *c)
+
+     ctx = (srtp_aes_gcm_ctx_t *)c->state;
+     if (ctx) {
++        mbedtls_cipher_free(&ctx->cipher_ctx_enc);
++        mbedtls_cipher_free(&ctx->cipher_ctx_dec);
+         srtp_crypto_free(ctx->key);
+         /* zeroize the key material */
+         octet_string_set_to_zero(ctx, sizeof(srtp_aes_gcm_ctx_t));
+
+
+
+
+@@ -25,6 +25,7 @@
+ struct hci_cmd_send_t {
+     struct k_sem send_sem;
+     uint8_t cmd_buf[BT_BUF_RX_SIZE];
++    uint16_t buf_len;
+ } g_esp32_hci_send;
+
+ struct hci_cmd_recv_t {
+@@ -210,15 +211,16 @@ static int esp32_hci_driver_send(struct net_buf *buf)
+     }
+
+     memcpy(g_esp32_hci_send.cmd_buf + 1, buf->data, buf->len);
++    g_esp32_hci_send.buf_len = buf->len;
+
++    BT_DBG("%s", bt_hex(buf->data, buf->len));
+     net_buf_unref(buf);
+
+-    BT_DBG("%s", bt_hex(buf->data, buf->len));
+
+     if(0==k_sem_take(&g_esp32_hci_send.send_sem, K_FOREVER)){
+         if (esp_vhci_host_check_send_available()) {
+             HCI_DRV_D(">>>");
+-            esp_vhci_host_send_packet(g_esp32_hci_send.cmd_buf, buf->len + 1);
++            esp_vhci_host_send_packet(g_esp32_hci_send.cmd_buf, g_esp32_hci_send.buf_len + 1);
+         }else{
+             HCI_DRV_D("VHCI NOT AVA");
+         }
+
+@@ -828,10 +828,13 @@ int32_t cli_printf(const char *buffer, ...)
+     va_end(ap);
+
+     if (len <= 0) {
++        cli_free(message);
++
+         return CLI_OK;
+     }
+
+     cli_putstr(message);
++    cli_free(message);
+
+     return CLI_OK;
+ }
+
+
+ @@ -1035,6 +1035,7 @@ static int iotx_mc_mask_subInfo_from(iotx_mc_client_t *c, unsigned int msgId, io
+             *messageHandler = node->handler;
+             node->handler = NULL;
+             node->node_state = IOTX_MC_NODE_STATE_INVALID; /* mark as invalid node */
++            break;
+         }
+     }
+
+
+     @@ -1436,7 +1437,14 @@ static int iotx_mc_handle_recv_SUBACK(iotx_mc_client_t *c)
+         return MQTT_SUB_INFO_NOT_FOUND_ERROR;
+     }
+
+-    if ((NULL == messagehandler->handle.h_fp) || (NULL == messagehandler->topic_filter)) {
++
++    if (NULL == messagehandler->topic_filter) {
++        mqtt_free(messagehandler);
++        return MQTT_SUB_INFO_NOT_FOUND_ERROR;
++    }
++
++    if ((NULL == messagehandler->handle.h_fp)) {
++        mqtt_free(messagehandler->topic_filter);
+         mqtt_free(messagehandler);
+         return MQTT_SUB_INFO_NOT_FOUND_ERROR;
+     }
+
+
+     @@ -1475,6 +1483,7 @@ static int iotx_mc_handle_recv_SUBACK(iotx_mc_client_t *c)
+             iotx_mc_topic_handle_t *handle = mqtt_malloc(sizeof(iotx_mc_topic_handle_t));
+             if (!handle) {
+                 mqtt_free(messagehandler[j].topic_filter);
++                mqtt_free(messagehandler);
+                 return FAIL_RETURN;
+             }
+
+
+
+-    if (NULL == messageHandler || NULL == messageHandler->topic_filter) {
+-        mqtt_debug("------------------------------------------------");
++    if (NULL == messageHandler) {
++        return MQTT_SUB_INFO_NOT_FOUND_ERROR;
++    }
++
++    if (NULL == messageHandler->topic_filter) {
++        mqtt_free(messageHandler);
+         return MQTT_SUB_INFO_NOT_FOUND_ERROR;
+     }
+
+
+     @@ -2507,12 +2521,12 @@ static int MQTTSubInfoProc(iotx_mc_client_t *pClient)
+         mqtt_debug("MQTTSubInfoProc Timeout, packetid: %d", node->msg_id);
+ #endif
+
+-        (void)iotx_mc_mask_subInfo_from(pClient, packet_id, &messageHandler);
+-
+         /* When arrive here, it means timeout to wait ACK */
+         packet_id = node->msg_id;
+         msg_type = node->type;
+
++        (void)iotx_mc_mask_subInfo_from(pClient, packet_id, &messageHandler);
++
+         /* Wait MQTT SUBSCRIBE ACK timeout */
+         if (SUBSCRIBE == msg_type) {
+             /* subscribe timeout */
+
+
+     /* Device AUTH */
+     if (0 != IOT_SetupConnInfo(PRODUCT_KEY, DEVICE_NAME, DEVICE_SECRET, (void **)&pconn_info)) {
+         EXAMPLE_TRACE("AUTH request failed!");
+-        rc = -1;
+-        goto do_exit;
++        return -1;
+     }
+
+
+      void alcs_auth_deinit(void)
+ {
++#ifdef SUPPORT_MULTI_DEVICES
++    device_auth_list *node = NULL, *next = NULL;
++#endif
++
+     alcs_resource_cb_deinit();
+     alcs_auth_list_deinit();
++
++#ifdef SUPPORT_MULTI_DEVICES
++    list_for_each_entry_safe(node, next, &device_list, lst, device_auth_list) {
++        if (node->lst_auth.list_mutex){
++            HAL_MutexDestroy(node->lst_auth.list_mutex);
++        }
++    }
++#else
++    if (_device.lst_auth.list_mutex){
++        HAL_MutexDestroy(_device.lst_auth.list_mutex);
++    }
++#endif
+ }
+
+
+  int HAL_Kv_Set(const char *key, const void *val, int len, int sync)
+ {
+-    int ret;
+     if (!kvfile) {
+         kvfile = kv_open("/tmp/kvfile.db");
+         if (!kvfile) {
+@@ -638,14 +637,11 @@ int HAL_Kv_Set(const char *key, const void *val, int len, int sync)
+         }
+     }
+
+-    ret = kv_set_blob(kvfile, (char *)key, (char *)val, len);
+-    kv_close(kvfile);
+-    return ret;
++    return kv_set_blob(kvfile, (char *)key, (char *)val, len);
+ }
+
+
+ @@ -356,6 +356,26 @@ int IOT_OTA_Deinit(void *handle)
+         OTA_FREE(h_ota->version);
+     }
+
++    if (NULL != h_ota->configId) {
++        OTA_FREE(h_ota->configId);
++    }
++
++    if (NULL != h_ota->sign) {
++        OTA_FREE(h_ota->sign);
++    }
++
++    if (NULL != h_ota->signMethod) {
++        OTA_FREE(h_ota->signMethod);
++    }
++
++    if (NULL != h_ota->cota_url) {
++        OTA_FREE(h_ota->cota_url);
++    }
++
++    if (NULL != h_ota->getType) {
++        OTA_FREE(h_ota->getType);
++    }
++
+     OTA_FREE(h_ota);
+     return 0;
+ }
+
+
+  int HAL_Kv_Set(const char *key, const void *val, int len, int sync)
+ {
++    int ret;
+     if (!kvfile) {
+         kvfile = kv_open("/tmp/kvfile.db");
+         if (!kvfile) {
+@@ -637,11 +638,14 @@ int HAL_Kv_Set(const char *key, const void *val, int len, int sync)
+         }
+     }
+
+-    return kv_set_blob(kvfile, (char *)key, (char *)val, len);
++    ret = kv_set_blob(kvfile, (char *)key, (char *)val, len);
++    kv_close(kvfile);
++    return ret;
+ }
+
+ -
+     memset(ctx, 0, sizeof(dm_ota_ctx_t));
+
+     HAL_GetProductKey(ctx->product_key);
+     HAL_GetDeviceName(ctx->device_name);
++#endif
++    return SUCCESS_RETURN;
++}
++
++int dm_ota_sub(void)
++{
++#ifdef OTA_ENABLED
++    dm_ota_ctx_t *ctx = _dm_ota_get_ctx();
++    void *handle = NULL;
+
+     /* Init OTA Handle */
+-    ctx->ota_handle = IOT_OTA_Init(ctx->product_key, ctx->device_name, NULL);
+-    if (ctx->ota_handle == NULL) {
++    handle = IOT_OTA_Init(ctx->product_key, ctx->device_name, NULL);
++    if (handle == NULL) {
+         return FAIL_RETURN;
+     }
+     +
++    ctx->ota_handle = handle;
+ #endif
+     return SUCCESS_RETURN;
+ }
+
+
+ @@ -31,6 +31,7 @@ int awss_release_coap_ctx(void *session)
+     struct coap_session_ctx_t *ctx = (struct coap_session_ctx_t *)session;
+     if (ctx == NULL)
+         return 0;
++
+     if (ctx->request) {
+         void *payload = ((struct CoAPMessage *)ctx->request)->payload;
+         if (payload) os_free(payload);
+@@ -46,28 +47,36 @@ void *awss_cpy_coap_ctx(void *request, void *remote, char mcast)
+     struct coap_session_ctx_t *ctx = os_zalloc(sizeof(struct coap_session_ctx_t));
+     if (ctx == NULL)
+         goto CPY_CTX_FAIL;
++
+     ctx->request = os_zalloc(sizeof(struct CoAPMessage));
+     if (ctx->request == NULL)
+         goto CPY_CTX_FAIL;
++
+     memcpy(ctx->request, request, sizeof(struct CoAPMessage));
+     do {
+         char *payload = NULL;
+         int len = 0;
+         struct CoAPMessage *req = (struct CoAPMessage *)ctx->request;
++
+
+
+ int awss_cmp_mqtt_register_cb(char *topic, void *cb)
+ {
+-    if (topic == NULL) {
++    if (topic == NULL)
+         return -1;
+-    }
+
+     return IOT_MQTT_Subscribe(NULL, topic, 0, (iotx_mqtt_event_handle_func_fpt)cb, NULL);
+ }
+
+ -        if (dev_bind_cnt++ < AWSS_NOTIFY_CNT_MAX &&
++        if (dev_bind_cnt ++ < AWSS_NOTIFY_CNT_MAX &&
+
+
+
+@@ -180,34 +174,33 @@ void awss_online_switchap(void *pcontext, void *pclient, void *msg)
+     elem = json_get_value_by_name(awss_info, awss_info_len, AWSS_SWITCH_MODE, &len, NULL);
+     if (elem != NULL && (elem[0] == '0' || elem[0] == 0)) {
+         elem = json_get_value_by_name(awss_info, awss_info_len, AWSS_TIMEOUT, &len, NULL);
+-        if (elem) {
++        if (elem)
+             timeout = (int)strtol(elem, &elem, 16);
+-        }
+     }
+
+-    {
++    do {
+         // reduce stack used
+         char *id = NULL;
+         char id_str[MSG_REQ_ID_LEN] = {0};
+         id = json_get_value_by_name(payload, payload_len, AWSS_JSON_ID, &len, NULL);
+         memcpy(id_str, id, len > MSG_REQ_ID_LEN - 1 ? MSG_REQ_ID_LEN - 1 : len);
+         awss_build_packet(AWSS_CMP_PKT_TYPE_RSP, id_str, ILOP_VER, METHOD_EVENT_ZC_SWITCHAP, "{}", 200, packet, &pa
+cket_len);
+-    }
+-    {
++    } while (0);
++
++    do {
+         char reply[TOPIC_LEN_MAX] = {0};
+         awss_build_topic(TOPIC_SWITCHAP_REPLY, reply, TOPIC_LEN_MAX);
+         awss_cmp_mqtt_send(reply, packet, packet_len, 1);
+         os_free(packet);
+-    }
++    } while (0);
+
+
+ static int awss_report_token_to_cloud()
+ {
+ #define REPORT_TOKEN_PARAM_LEN  (64)
+-    if (awss_report_token_suc || awss_report_token_cnt ++ > MATCH_REPORT_CNT_MAX) {
++    if (awss_report_token_suc)  // success ,no need to report
+         return 0;
++
++    /*
++     * it is still failed after try to report token MATCH_REPORT_CNT_MAX times
++     */
++    if (awss_report_token_cnt ++ > MATCH_REPORT_CNT_MAX) {
++        awss_stop_timer(report_token_timer);
++        report_token_timer = NULL;
++        return -2;
+     }
+
+
+
+@@ -1286,6 +1286,7 @@ int dm_mgr_upstream_thing_property_get_response(_IN_ int devid, _IN_ char *msgid
+     int res = 0;
+     dm_msg_request_payload_t request;
+     dm_msg_response_t response;
++    dm_server_alcs_context_t *alcs_context = (dm_server_alcs_context_t *)ctx;
+
+     if (devid < 0 || msgid == NULL || msgid_len <= 0 ||
+         payload == NULL || payload_len <= 0) {
+@@ -1305,6 +1306,13 @@ int dm_mgr_upstream_thing_property_get_response(_IN_ int devid, _IN_ char *msgid
+
+     /* Send Property Get Response Message To Local */
+     dm_msg_response(DM_MSG_DEST_LOCAL, &request, &response, payload, payload_len, ctx);
++
++    if (alcs_context) {
++        DM_free(alcs_context->ip);
++        DM_free(alcs_context->token);
++        DM_free(alcs_context);
++    }
++
+     return SUCCESS_RETURN;
+ }
+
+
+ -    STRING_PTR_SANITY_CHECK(pInitParams->host, NULL);
+-    STRING_PTR_SANITY_CHECK(pInitParams->client_id, NULL);
+-    STRING_PTR_SANITY_CHECK(pInitParams->username, NULL);
+-    STRING_PTR_SANITY_CHECK(pInitParams->password, NULL);
++    if (pInitParams->host == NULL || pInitParams->client_id == NULL ||
++        pInitParams->username == NULL || pInitParams->password == NULL) {
++        mqtt_err("init params is not complete");
++        if (mqtt_params != NULL) {
++            mqtt_free(mqtt_params);
++        }
++        return NULL;
++    }
+
+
+@@ -3507,7 +3510,7 @@ int IOT_MQTT_Destroy(void **phandler)
+     void *client;
+     if (phandler != NULL) {
+         client = *phandler;
+-       *phandler = NULL;
++        *phandler = NULL;
+     } else {
+         client = g_mqtt_client;
+     }
+
+         int ret = IOT_SetupConnInfo(product_key, device_name, device_secret, (void **)&pconn_info);
+         if (ret != SUCCESS_RETURN) {
++            mqtt_free(mqtt_params);
+             return NULL;
+         }
+
+
++#ifdef DUMP_MM
++        test_post_player_status_change_event(TEST_DEVICE_EVENT_BUTTON_NEXT);
++        dumpsys_mm_info_func(NULL,0);
++#endif
+
+
+@@ -213,6 +216,6 @@ void xplayer_run(void)
+
+ int  xPlayer_add_to_queue(const char * url)
+ {
+- return aos_queue_send(&player_cached_queue,url,strlen(url)+1);
++    return aos_queue_send(&player_cached_queue,url,strlen(url)+1);
+ }
