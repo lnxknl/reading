@@ -481,3 +481,328 @@ cket_len);
 - return aos_queue_send(&player_cached_queue,url,strlen(url)+1);
 +    return aos_queue_send(&player_cached_queue,url,strlen(url)+1);
  }
+
+
+ +void aos_set_log_level(aos_log_level_t log_level)
++{
++    unsigned int value = 0;
++
++    switch (log_level) {
++        case AOS_LL_NONE:
++            value |= AOS_LL_V_NONE;
++            break;
++        case AOS_LL_DEBUG:
++            value |= AOS_LL_V_DEBUG;
++        case AOS_LL_INFO:
++            value |= AOS_LL_V_INFO;
++        case AOS_LL_WARN:
++            value |= AOS_LL_V_WARN;
++        case AOS_LL_ERROR:
++            value |= AOS_LL_V_ERROR;
++        case AOS_LL_FATAL:
++            value |= AOS_LL_V_FATAL;
++            break;
++        default:
++            break;
++    }
++
++    aos_log_level = value;
++}
+
+
+int aos_set_log_level(aos_log_level_t log_level)
+{
+    int rc = -EINVAL;
+
+    if(aos_ulog_init) {
+        if (log_level <= AOS_LL_DEBUG) {
+            on_filter_level_changes(ulog_session_std, log_level + 1);
+            rc = 0;
+        }
+    }
+    return rc;
+}
+
+
+
+typedef enum
+{
+    RHINO_SUCCESS = 0u,
+    RHINO_SYS_FATAL_ERR,
+    RHINO_SYS_SP_ERR,
+    RHINO_RUNNING,
+    RHINO_STOPPED,
+    RHINO_INV_PARAM,
+    RHINO_NULL_PTR,
+    RHINO_INV_ALIGN,
+    RHINO_KOBJ_TYPE_ERR,
+    RHINO_KOBJ_DEL_ERR,
+    RHINO_KOBJ_DOCKER_EXIST,
+    RHINO_KOBJ_BLK,
+    RHINO_KOBJ_SET_FULL,
+    RHINO_NOTIFY_FUNC_EXIST,
+
+    RHINO_MM_POOL_SIZE_ERR = 100u,
+    RHINO_MM_ALLOC_SIZE_ERR,
+    RHINO_MM_FREE_ADDR_ERR,
+    RHINO_MM_CORRUPT_ERR,
+    RHINO_DYN_MEM_PROC_ERR,
+    RHINO_NO_MEM,
+    RHINO_RINGBUF_FULL,
+    RHINO_RINGBUF_EMPTY,
+
+    RHINO_SCHED_DISABLE = 200u,
+    RHINO_SCHED_ALREADY_ENABLED,
+    RHINO_SCHED_LOCK_COUNT_OVF,
+    RHINO_INV_SCHED_WAY,
+
+    RHINO_TASK_INV_STACK_SIZE = 300u,
+    RHINO_TASK_NOT_SUSPENDED,
+    RHINO_TASK_DEL_NOT_ALLOWED,
+    RHINO_TASK_SUSPEND_NOT_ALLOWED,
+    RHINO_TASK_CANCELED,
+    RHINO_SUSPENDED_COUNT_OVF,
+    RHINO_BEYOND_MAX_PRI,
+    RHINO_PRI_CHG_NOT_ALLOWED,
+    RHINO_INV_TASK_STATE,
+    RHINO_IDLE_TASK_EXIST,
+
+    RHINO_NO_PEND_WAIT = 400u,
+    RHINO_BLK_ABORT,
+    RHINO_BLK_TIMEOUT,
+    RHINO_BLK_DEL,
+    RHINO_BLK_INV_STATE,
+    RHINO_BLK_POOL_SIZE_ERR,
+
+    RHINO_TIMER_STATE_INV = 500u,
+
+    RHINO_NO_THIS_EVENT_OPT = 600u,
+
+    RHINO_BUF_QUEUE_INV_SIZE = 700u,
+    RHINO_BUF_QUEUE_SIZE_ZERO,
+    RHINO_BUF_QUEUE_FULL,
+    RHINO_BUF_QUEUE_MSG_SIZE_OVERFLOW,
+    RHINO_QUEUE_FULL,
+    RHINO_QUEUE_NOT_FULL,
+
+    RHINO_SEM_OVF = 800u,
+    RHINO_SEM_TASK_WAITING,
+
+    RHINO_MUTEX_NOT_RELEASED_BY_OWNER = 900u,
+    RHINO_MUTEX_OWNER_NESTED,
+    RHINO_MUTEX_NESTED_OVF,
+
+    RHINO_NOT_CALLED_BY_INTRPT = 1000u,
+    RHINO_TRY_AGAIN,
+
+    RHINO_WORKQUEUE_EXIST = 1100u,
+    RHINO_WORKQUEUE_NOT_EXIST,
+    RHINO_WORKQUEUE_WORK_EXIST,
+    RHINO_WORKQUEUE_BUSY,
+    RHINO_WORKQUEUE_WORK_RUNNING,
+
+    RHINO_TASK_STACK_OVF = 1200u,
+    RHINO_INTRPT_STACK_OVF,
+
+    RHINO_STATE_ALIGN = INT_MAX /* keep enum 4 bytes at 32bit machine */
+} kstat_t;
+
+
+void abort(void)
+{
+    k_err_proc(RHINO_SYS_FATAL_ERR);
+    /* This function declares the noreturn attribute, and execution should not return */
+    while (1)
+        ;
+}
+
+void aos_free(void *mem)
+{
+    free(mem);
+}
+
+
+void *aos_zalloc(size_t size)
+{
+    return calloc(size, 1);
+}
+
+void *aos_malloc(size_t size)
+{
+    return malloc(size);
+}
+
+void *aos_calloc(size_t nitems, size_t size)
+{
+    return calloc(nitems, size);
+}
+
+void *aos_realloc(void *mem, size_t size)
+{
+    return realloc(mem, size);
+}
+
+
+int aos_timer_stop(aos_timer_t *timer)
+{
+    struct itimerspec ts;
+    osal_timer_inner_t *amp_timer = NULL;
+
+    /* check parameter */
+    if (timer == NULL) {
+        return -1;
+    }
+
+    amp_timer = (osal_timer_inner_t *)*timer;
+
+    /* it_interval=0: timer run only once */
+    ts.it_interval.tv_sec = 0;
+    ts.it_interval.tv_nsec = 0;
+
+    /* it_value=0: stop timer */
+    ts.it_value.tv_sec = 0;
+    ts.it_value.tv_nsec = 0;
+
+    return timer_settime(amp_timer->timer, 0, &ts, NULL);
+}
+
+
+int _gettimeofday_r(struct _reent *ptr, struct timeval *tv, void *__tzp)
+{
+    uint64_t t;
+    struct timezone *tz = __tzp;
+
+    if (tv) {
+        t = aos_calendar_time_get();
+        tv->tv_sec  = t / 1000;
+        tv->tv_usec = (t % 1000) * 1000;
+    }
+
+    if (tz) {
+        /* Not supported. */
+        tz->tz_minuteswest = 0;
+        tz->tz_dsttime = 0;
+    }
+
+    return 0;
+}
+
+
+uint64_t aos_calendar_time_get(void)
+{
+    return krhino_sys_time_get() + start_time_ms;
+}
+
+sys_time_t krhino_sys_time_get(void)
+{
+    return (sys_time_t)(krhino_sys_tick_get() * 1000 / RHINO_CONFIG_TICKS_PER_SECOND);
+}
+
+typedef uint64_t sys_time_t;
+
+typedef uint64_t tick_t;
+
+tick_t krhino_sys_tick_get(void)
+{
+    CPSR_ALLOC();
+    tick_t tick_tmp;
+
+    RHINO_CPU_INTRPT_DISABLE();
+    tick_tmp = g_tick_count;
+    RHINO_CPU_INTRPT_ENABLE();
+
+    return tick_tmp;
+}
+
+#define CPSR_ALLOC()                cpu_cpsr_t cpsr
+
+#define RHINO_CPU_INTRPT_DISABLE()  do{cpsr = cpu_intrpt_save();}while(0)
+#define RHINO_CPU_INTRPT_ENABLE()   do{cpu_intrpt_restore(cpsr);}while(0)
+
+tick_t krhino_sys_tick_get(void)
+{
+    CPSR_ALLOC();
+    tick_t tick_tmp;
+
+    RHINO_CPU_INTRPT_DISABLE();
+    tick_tmp = g_tick_count;
+    RHINO_CPU_INTRPT_ENABLE();
+
+    return tick_tmp;
+}
+
+#define RHINO_CONFIG_TICKS_PER_SECOND        100
+
+
+_ssize_t _write_r(struct _reent *ptr, int fd, const void *buf, size_t nbytes)
+{
+    int ret;
+    const char *tmp = buf;
+    int         i   = 0;
+    uart_dev_t  uart_stdio;
+
+    if (buf == NULL) {
+        ptr->_errno = EINVAL;
+        return 0;
+    }
+
+    memset(&uart_stdio, 0, sizeof(uart_stdio));
+    uart_stdio.port = HAL_UART_STDIO_PORT;
+
+    if ((fd >= FD_VFS_START) && (fd <= FD_VFS_END)) {
+        ret = aos_write(fd, buf, nbytes);
+        LIBC_CHECK_AOS_RET(ret);
+        return ret;
+#ifdef POSIX_DEVICE_IO_NEED
+#ifdef CONFIG_AOS_LWIP
+    } else if ((fd >= FD_SOCKET_START) && (fd <= FD_EVENT_END)) {
+        return lwip_write(fd, buf, nbytes);
+#endif
+#endif
+    } else if ((fd == STDOUT_FILENO) || (fd == STDERR_FILENO)) {
+        for (i = 0; i < nbytes; i++) {
+            if (*tmp == '\n' && !(i > 0 && *(tmp - 1) == '\r')) {
+#ifdef TELNETD_ENABLED
+                TelnetWrite('\r');
+#endif
+                hal_uart_send(&uart_stdio, (void *)"\r", 1, AOS_WAIT_FOREVER);
+            }
+
+#ifdef TELNETD_ENABLED
+            TelnetWrite(*tmp);
+#endif
+            hal_uart_send(&uart_stdio, (void *)tmp, 1, AOS_WAIT_FOREVER);
+            tmp++;
+        }
+
+        return nbytes;
+    } else {
+        ptr->_errno = EBADF;
+        return -1;
+    }
+}
+
+ssize_t aos_write(int fd, const void *buf, size_t nbytes)
+{
+    return write(fd, buf, nbytes);
+}
+
+
+int _write(int file, char * ptr, int len)
+{
+ 	int nChars = 0;
+ 	/* Check for stdout and stderr
+ 	(only necessary if file descriptors are enabled.) */
+ 	if (file != 1 && file != 2)
+ 	{
+ 		return -1;
+ 	}
+ 	for (/*Empty */; len > 0; --len)
+ 	{
+ 		DiagPutChar(*ptr++);
+ 		++nChars;
+ 	}
+ 	return nChars;
+}
+
+#define LIBC_CHECK_AOS_RET(ret) do {if ((ret) < 0) {ptr->_errno = -(ret); return -1; } } while (0)

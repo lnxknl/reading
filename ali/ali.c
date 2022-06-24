@@ -1194,3 +1194,17 @@ static void debug_task_show(int (*print_func)(const char *fmt, ...), ktask_t *ta
 
 #define krhino_list_entry(node, type, member) ((type *)((uint8_t *)(node) - (size_t)(&((type *)0)->member)))
 
+
+static const JSCFunctionListEntry js_log_funcs[] = {
+    JS_CFUNC_DEF("debug", 0, native_debug_log_out ),
+    JS_CFUNC_DEF("info", 0, native_info_log_out ),
+    JS_CFUNC_DEF("warn", 0, native_warn_log_out ),
+    JS_CFUNC_DEF("error", 0, native_error_log_out),
+    JS_CFUNC_DEF("fatal", 0, native_fatal_log_out),
+    JS_CFUNC_DEF("stdloglevel", 1, native_set_stdlog_level ),
+    JS_CFUNC_DEF("cloudloglevel", 1, native_set_popcloud_log_level ),
+    JS_CFUNC_DEF("fsloglevel", 1, native_set_popfs_log_level ),
+    JS_CFUNC_DEF("setlogfilepath", 1, native_set_log_file_path ),
+    JS_CFUNC_DEF("setlogfilesize", 1, native_set_log_file_size ),
+};
+
